@@ -303,7 +303,11 @@ void LagrangianHydroOperator::Mult(const Vector &S, Vector &dS_dt) const
    Vector* sptr = const_cast<Vector*>(&S);
    ParGridFunction v;
    const int VsizeH1 = H1.GetVSize();
+
+   // mfem - linalg/vector.hpp:171 MakeRef
+   // Reset the Vector to be a reference to a sub-vector of @a base.
    v.MakeRef(&H1, *sptr, VsizeH1);
+  
    // Set dx_dt = v (explicit).
    ParGridFunction dx;
    dx.MakeRef(&H1, dS_dt, 0);

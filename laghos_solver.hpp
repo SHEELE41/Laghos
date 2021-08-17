@@ -92,6 +92,7 @@ public:
    void UpdateQuadratureData(const Vector &S, QuadratureData &qdata);
 };
 
+// LagrangianHydroOperator는 TimeDependentOperator를 상속받음
 // Given a solutions state (x, v, e), this class performs all necessary
 // computations to evaluate the new slopes (dx_dt, dv_dt, de_dt).
 class LagrangianHydroOperator : public TimeDependentOperator
@@ -134,12 +135,22 @@ protected:
    // assembled in each time step and then it is used to compute the final
    // right-hand sides for momentum and specific internal energy.
    mutable MixedBilinearForm Force;
+
+   ///////////////////////////////////////////////////////////////////////////
+   // XXXXPAOperator 선언 위치 : laghos_assembly.hpp                         //
+   // mfem의 Operator를 상속받음.                                            //
+   // 각 Operator의 Mult는 laghos_assembly.cpp에 구현되어 있음.               //
+   ///////////////////////////////////////////////////////////////////////////
+
    // Same as above, but done through partial assembly.
    ForcePAOperator *ForcePA;
    // Mass matrices done through partial assembly:
    // velocity (coupled H1 assembly) and energy (local L2 assemblies).
    MassPAOperator *VMassPA, *EMassPA;
    OperatorJacobiSmoother *VMassPA_Jprec;
+
+   // CGSolver는 mfem의 linalg/solvers.hpp에 정의되어 있음
+   // IterativeSolver를 상속받음
    // Linear solver for energy.
    CGSolver CG_VMass, CG_EMass;
    mutable TimingData timer;
