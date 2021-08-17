@@ -84,13 +84,18 @@ static void Checks(const int dim, const int ti, const double norm, int &checks);
 int main(int argc, char *argv[])
 {
    // Initialize MPI.
+   // https://github.com/mfem/mfem/blob/master/general/communication.hpp
+   // MFEM에 선언되어 있는 MPI_Session 클래스를 이용하여 MPI 초기화 작업
+   // myid에는 현재 프로세서의 MPI_COMM_WORLD 커뮤니케이터에서의 랭크 값이 할당됨.
    MPI_Session mpi(argc, argv);
    const int myid = mpi.WorldRank();
 
    // Print the banner.
+   // 그냥 Laghos 배너 출력
    if (mpi.Root()) { display_banner(cout); }
 
    // Parse command-line options.
+   // 옵션 관련 작업
    problem = 1;
    dim = 3;
    const char *mesh_file = "default";
@@ -201,6 +206,7 @@ int main(int argc, char *argv[])
    if (mpi.Root()) { args.PrintOptions(cout); }
 
    // Configure the device from the command line options
+   // Device 옵션 관련 작업
    Device backend;
    backend.Configure(device, dev);
    if (mpi.Root()) { backend.Print(); }
@@ -208,6 +214,8 @@ int main(int argc, char *argv[])
 
    // On all processors, use the default builtin 1D/2D/3D mesh or read the
    // serial one given on the command line.
+   // 명령어 옵션을 바탕으로 전처리 작업 해주는 듯.
+   // 딱히 MPI 작업은 보이지 않는 것 같음.
    Mesh *mesh;
    if (strncmp(mesh_file, "default", 7) != 0)
    {
@@ -249,6 +257,7 @@ int main(int argc, char *argv[])
    dim = mesh->Dimension();
 
    // 1D vs partial assembly sanity check.
+   // 유효한 옵션 조합인지 검증
    if (p_assembly && dim == 1)
    {
       p_assembly = false;
@@ -259,6 +268,7 @@ int main(int argc, char *argv[])
    }
 
    // Refine the mesh in serial to increase the resolution.
+   // 역시 MPI 작업같지는 않음
    for (int lev = 0; lev < rs_levels; lev++) { mesh->UniformRefinement(); }
    const int mesh_NE = mesh->GetNE();
    if (mpi.Root())
@@ -266,9 +276,15 @@ int main(int argc, char *argv[])
       cout << "Number of zones in the serial mesh: " << mesh_NE << endl;
    }
 
+   /*************************************************************************
+    * 병렬 작업 시작
+    * 이제부터는 각 프로세스에 대한 관점으로 봐야 함.
+   *************************************************************************/
    // Parallel partitioning of the mesh.
+   // 작업 시작 전 병렬화를 위해 mesh를 분할.
    ParMesh *pmesh = nullptr;
-   const int num_tasks = mpi.WorldSize(); int unit = 1;
+   const int num_tasks = mpi.WorldSize();
+   int unit = 1;
    int *nxyz = new int[dim];
    switch (partition_type)
    {
@@ -354,6 +370,7 @@ int main(int argc, char *argv[])
             cout << "Unknown partition type: " << partition_type << '\n';
          }
          delete mesh;
+         // 뭔가 오류가 있으면 MPI 초기화하고 프로그램 종료.
          MPI_Finalize();
          return 3;
    }
@@ -375,6 +392,9 @@ int main(int argc, char *argv[])
       int *partitioning = cartesian_partitioning ?
                           mesh->CartesianPartitioning(cxyz):
                           mesh->CartesianPartitioning(nxyz);
+      // https://mfem.github.io/doxygen/html/classmfem_1_1ParMesh.html
+      // https://mfem.github.io/doxygen/html/classmfem_1_1ParMesh.html#a0df4bd271c941c795c854e1d92f34dcb
+      // ParMesh를 통한 병렬 Mesh 생성
       pmesh = new ParMesh(MPI_COMM_WORLD, *mesh, partitioning);
       delete [] partitioning;
    }
@@ -391,14 +411,24 @@ int main(int argc, char *argv[])
 #ifndef MFEM_USE_METIS
       return 1;
 #endif
+      // https://mfem.github.io/doxygen/html/classmfem_1_1ParMesh.html
+      // https://mfem.github.io/doxygen/html/classmfem_1_1ParMesh.html#a0df4bd271c941c795c854e1d92f34dcb
+      // ParMesh를 통한 병렬 Mesh 생성
       pmesh = new ParMesh(MPI_COMM_WORLD, *mesh);
    }
+   // 이제 안 쓰는 변수 제거
    delete [] nxyz;
    delete mesh;
 
    // Refine the mesh further in parallel to increase the resolution.
+   // 병렬로 rp_levles 번 만큼 Refine 작업 실행.
+   // 여기서 rp_levels는 명령어에서 -rp 옵션 값을 참조 
    for (int lev = 0; lev < rp_levels; lev++) { pmesh->UniformRefinement(); }
 
+   // 병렬로 각 메쉬에 대한 GetNE() 작업 실행 후 MPI_Reduce를 통해 커뮤니티 내 모든 프로세스에 대해 Reduce
+   // 그 결과로 가장 적은 element를 가진 메쉬의 element 개수(ne_min)와 가장 많은 element를 가진 메쉬의 element 개수(ne_max) 값을 얻음
+   // 매번 pmesh->GetComm() 하는게 좀 그렇지 않나?
+   // getNE() : 메쉬에 속한 element 개수를 리턴하는 함수
    int NE = pmesh->GetNE(), ne_min, ne_max;
    MPI_Reduce(&NE, &ne_min, 1, MPI_INT, MPI_MIN, 0, pmesh->GetComm());
    MPI_Reduce(&NE, &ne_max, 1, MPI_INT, MPI_MAX, 0, pmesh->GetComm());
@@ -408,6 +438,8 @@ int main(int argc, char *argv[])
    // Define the parallel finite element spaces. We use:
    // - H1 (Gauss-Lobatto, continuous) for position and velocity.
    // - L2 (Bernstein, discontinuous) for specific internal energy.
+   // 병렬화 기초 작업 하는 듯?
+   // 각 FESpace 모두 pmesh를 통해 선언되었으므로 각 프로세스에 할당된 자원임.
    L2_FECollection L2FEC(order_e, dim, BasisType::Positive);
    H1_FECollection H1FEC(order_v, dim);
    ParFiniteElementSpace L2FESpace(pmesh, &L2FEC);
@@ -415,6 +447,7 @@ int main(int argc, char *argv[])
 
    // Boundary conditions: all tests use v.n = 0 on the boundary, and we assume
    // that the boundaries are straight.
+   // 경계조건 작업
    Array<int> ess_tdofs, ess_vdofs;
    {
       Array<int> ess_bdr(pmesh->bdr_attributes.Max()), dofs_marker, dofs_list;
@@ -432,6 +465,11 @@ int main(int argc, char *argv[])
    }
 
    // Define the explicit ODE solver used for time integration.
+   // ODESolver(상미분방정식 풀이 객체) 선언
+   // ode_solver_type에 따라 쓰이는 클래스가 다른데 이는 명령어의 -s 옵션으로 변경 가능한 듯
+   // 근데 일단 우리가 쓰는 명령어에는 -s 옵션 없으므로 default 4가 사용되어 RK4Solver가 선언됨.
+   // RK2AvgSolver를 제외하고는 모두 mfem-linalg-ode.cpp에 위치해있음!!!
+   // laghos_solver에서 찾지 말 것!
    ODESolver *ode_solver = NULL;
    switch (ode_solver_type)
    {
@@ -451,6 +489,12 @@ int main(int argc, char *argv[])
          return 3;
    }
 
+   // mfem ParFiniteElementSpace 클래스의 메소드를 이용해 뭔가 Hypre 자료형을 리턴하는 듯.
+   /*
+      HYPRE_BigInt GlobalTrueVSize() const
+      { return Dof_TrueDof_Matrix()->GetGlobalNumCols(); }
+   */
+   // GetGlobalNumCols()는 hypre.hpp에 선언되어 있으며 global 열 개수를 리턴하는 것으로 보임
    const HYPRE_Int glob_size_l2 = L2FESpace.GlobalTrueVSize();
    const HYPRE_Int glob_size_h1 = H1FESpace.GlobalTrueVSize();
    if (mpi.Root())
@@ -465,6 +509,7 @@ int main(int argc, char *argv[])
    // - 0 -> position
    // - 1 -> velocity
    // - 2 -> specific internal energy
+   // 각 프로세스에 속한 FESpace에 대한 작업
    const int Vsize_l2 = L2FESpace.GetVSize();
    const int Vsize_h1 = H1FESpace.GetVSize();
    Array<int> offset(4);
@@ -478,17 +523,25 @@ int main(int argc, char *argv[])
    // internal energy. There is no function for the density, as we can always
    // compute the density values given the current mesh position, using the
    // property of pointwise mass conservation.
+   // 뭔가 아직도 refine 해주어야 할 것이 남았나봄.
    ParGridFunction x_gf, v_gf, e_gf;
    x_gf.MakeRef(&H1FESpace, S, offset[0]);
    v_gf.MakeRef(&H1FESpace, S, offset[1]);
    e_gf.MakeRef(&L2FESpace, S, offset[2]);
 
    // Initialize x_gf using the starting mesh coordinates.
+   // 초기화
    pmesh->SetNodalGridFunction(&x_gf);
    // Sync the data location of x_gf with its base, S
+   /*
+      void mfem::Vector::SyncAliasMemory (const Vector &v) const
+      Update the alias memory location of the vector to match v.
+      Definition at line 235 of file vector.hpp.
+   */
    x_gf.SyncAliasMemory(S);
 
    // Initialize the velocity.
+   // 초기화
    VectorFunctionCoefficient v_coeff(pmesh->Dimension(), v0);
    v_gf.ProjectCoefficient(v_coeff);
    for (int i = 0; i < ess_vdofs.Size(); i++)
@@ -504,6 +557,7 @@ int main(int argc, char *argv[])
    // is to get a high-order representation of the initial condition. Note that
    // this density is a temporary function and it will not be updated during the
    // time evolution.
+   // 역시 초기화. 아직 Step에 따른 연산은 진행하지 않음.
    ParGridFunction rho0_gf(&L2FESpace);
    FunctionCoefficient rho0_coeff(rho0);
    L2_FECollection l2_fec(order_e, pmesh->Dimension());
@@ -529,6 +583,7 @@ int main(int argc, char *argv[])
 
    // Piecewise constant ideal gas coefficient over the Lagrangian mesh. The
    // gamma values are projected on function that's constant on the moving mesh.
+   // 무언가의 초기 작업인듯.
    L2_FECollection mat_fec(0, pmesh->Dimension());
    ParFiniteElementSpace mat_fes(pmesh, &mat_fec);
    ParGridFunction mat_gf(&mat_fes);
@@ -536,6 +591,7 @@ int main(int argc, char *argv[])
    mat_gf.ProjectCoefficient(mat_coeff);
 
    // Additional details, depending on the problem.
+   // 문제 유형에 따른 추가 작업
    int source = 0; bool visc = true, vorticity = false;
    switch (problem)
    {
@@ -551,6 +607,10 @@ int main(int argc, char *argv[])
    }
    if (impose_visc) { visc = true; }
 
+   // 본격적인 작업을 위한 객체 선언
+   // LagrangianHydroOperator 클래스의 인스턴스 hydro 생성 
+   // LagrangianHydroOperator는 mfem의 TimeDependentOperator를 상속받았음.
+   // laghos_solver.hpp:97 참조 
    hydrodynamics::LagrangianHydroOperator hydro(S.Size(),
                                                 H1FESpace, L2FESpace, ess_tdofs,
                                                 rho0_coeff, rho0_gf,
@@ -559,15 +619,19 @@ int main(int argc, char *argv[])
                                                 cg_tol, cg_max_iter, ftz_tol,
                                                 order_q);
 
+   // 연산 결과 Visualization에 대한 옵션이 활성화 되어있을 경우 사용되는 변수인 것 같은데 해당 사항 없으므로 스킵.
    socketstream vis_rho, vis_v, vis_e;
    char vishost[] = "localhost";
    int  visport   = 19916;
 
    ParGridFunction rho_gf;
+   // 해당 사항 없음.
+   // visit은 기본값 false에다가 따로 옵션을 주어야만 true로 변경 가능한데 우리는 이용하지 않음.
    if (visualization || visit) { hydro.ComputeDensity(rho_gf); }
    const double energy_init = hydro.InternalEnergy(e_gf) +
                               hydro.KineticEnergy(v_gf);
 
+   // 해당 사항 없음.
    if (visualization)
    {
       // Make sure all MPI ranks have sent their 'v' solution before initiating
@@ -592,6 +656,7 @@ int main(int argc, char *argv[])
                                     "Specific Internal Energy", Wx, Wy, Ww, Wh);
    }
 
+   // 해당 사항 없음.
    // Save data for VisIt visualization.
    VisItDataCollection visit_dc(basename, pmesh);
    if (visit)
@@ -607,6 +672,11 @@ int main(int argc, char *argv[])
    // Perform time-integration (looping over the time iterations, ti, with a
    // time-step dt). The object oper is of type LagrangianHydroOperator that
    // defines the Mult() method that used by the time integrators.
+   // 대충 번역하면 LagrangianHydroOperator의 Mult() 연산을 이용하여 시간 적분을 수행한다는 것
+   // Mult() 연산이 정의된 곳이 많아서 이렇게 따로 명시해둔 듯? 
+
+   // for 루프 돌기 전 기본적인 초기화
+   // hydro는 TimeDependentOperator를 상속받은 클래스의 객체이므로 Init에 들어갈 수 있음
    ode_solver->Init(hydro);
    hydro.ResetTimeStepEstimate();
    double t = 0.0, dt = hydro.GetTimeStepEstimate(S), t_old;
@@ -636,8 +706,12 @@ int main(int argc, char *argv[])
    //      }
    //      cout << endl;
    //   }
+   /****************************************************************************************
+    * Step 별 작업 수행
+    ****************************************************************************************/
    for (int ti = 1; !last_step; ti++)
    {
+      // 마지막 스텝 처리
       if (t + dt >= t_final)
       {
          dt = t_final - t;
@@ -650,10 +724,14 @@ int main(int argc, char *argv[])
 
       // S is the vector of dofs, t is the current time, and dt is the time step
       // to advance.
+      // 여기가 스텝 연산 실행시키는 부분
+      // RK4Solver::Step
+      // mfem - linalg - ode.cpp:109
       ode_solver->Step(S, t, dt);
       steps++;
 
       // Adaptive time step control.
+      // 중간중간 Repeating step 출력되는 원인인데 시간 관련 예외 처리를 해주는 것으로 보임
       const double dt_est = hydro.GetTimeStepEstimate(S);
       if (dt_est < dt)
       {
@@ -674,6 +752,8 @@ int main(int argc, char *argv[])
       // Ensure the sub-vectors x_gf, v_gf, and e_gf know the location of the
       // data in S. This operation simply updates the Memory validity flags of
       // the sub-vectors to match those of S.
+      // https://blog.daum.net/risinsun2/15
+      // Memory Aliasing 관련 문서
       x_gf.SyncAliasMemory(S);
       v_gf.SyncAliasMemory(S);
       e_gf.SyncAliasMemory(S);
@@ -683,10 +763,15 @@ int main(int argc, char *argv[])
       // and the oper object might have redirected the mesh positions to those.
       pmesh->NewNodes(x_gf, false);
 
+      // 마지막 Step이나 현재 Step 위치를 vis_step(default 5)로 나눈 것이 0이라면 실행
+      // Step이 5 단위로 출력되는 이유
+      // 사실상 결과 출력 로직으로, 연산은 아님.
       if (last_step || (ti % vis_steps) == 0)
       {
          double lnorm = e_gf * e_gf, norm;
          MPI_Allreduce(&lnorm, &norm, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
+         // 기본적으로 false, 옵션도 딱히 주지 않았음.
+         // 그냥 Step과 함께 메모리 사용량을 출력할지 말지 선택하는 옵션
          if (mem_usage)
          {
             mem = GetMaxRssMB();
@@ -695,6 +780,8 @@ int main(int argc, char *argv[])
          }
          // const double internal_energy = hydro.InternalEnergy(e_gf);
          // const double kinetic_energy = hydro.KineticEnergy(v_gf);
+         // Root 프로세스의 경우 Step에 따른 결과를 출력
+         // 즉 연산은 이미 끝났음
          if (mpi.Root())
          {
             const double sqrt_norm = sqrt(norm);
@@ -721,8 +808,11 @@ int main(int argc, char *argv[])
 
          // Make sure all ranks have sent their 'v' solution before initiating
          // another set of GLVis connections (one from each rank):
+         // 동일 커뮤니케이터 내의 모든 프로세스가 MPI_Barrier를 호출하기 전까지는 진행하지 않음.
+         // 실행 시간에 악영향을 미칠수도.
          MPI_Barrier(pmesh->GetComm());
 
+         // 해당 없음.
          if (visualization || visit || gfprint) { hydro.ComputeDensity(rho_gf); }
          if (visualization)
          {
@@ -744,6 +834,7 @@ int main(int argc, char *argv[])
             Wx += offx;
          }
 
+         // 해당 없음.
          if (visit)
          {
             visit_dc.SetCycle(ti);
@@ -751,6 +842,8 @@ int main(int argc, char *argv[])
             visit_dc.Save();
          }
 
+         // 해당 없음.
+         // default false에 옵션 설정도 안함.
          if (gfprint)
          {
             std::ostringstream mesh_name, rho_name, v_name, e_name;
@@ -782,6 +875,8 @@ int main(int argc, char *argv[])
       }
 
       // Problems checks
+      // 해당 없음.
+      // 값 검증하기 위한 로직인데 default false
       if (check)
       {
          double lnorm = e_gf * e_gf, norm;
@@ -798,8 +893,15 @@ int main(int argc, char *argv[])
          Checks(dim, ti, e_norm, checks);
       }
    }
+   // for 루프 끝나고 검증이 잘 되었는지 검증
+   // 앞의 조건문이 참이 아니면 뒤 메시지 출력
+   // 즉, check가 true인 동시에 checks가 2가 아니면 에러 메시지 출력
+   // 연산 성능에 대해서 별 의미는 없음
    MFEM_VERIFY(!check || checks == 2, "Check error!");
 
+   // 마지막으로 총 Step 수를 계산해줌
+   // ode_solver_type에 따라 총 Step이 달라지는 듯 함.
+   // 우리는 4이므로 총 Step에 4를 곱해줌.
    switch (ode_solver_type)
    {
       case 2: steps *= 2; break;
@@ -809,8 +911,10 @@ int main(int argc, char *argv[])
       case 7: steps *= 2;
    }
 
+   // H1, L2, Force, Qdata 등 최종 결과 출력
    hydro.PrintTimingData(mpi.Root(), steps, fom);
 
+   // 해당 없음.
    if (mem_usage)
    {
       mem = GetMaxRssMB();
@@ -818,6 +922,7 @@ int main(int argc, char *argv[])
       MPI_Reduce(&mem, &msum, 1, MPI_LONG, MPI_SUM, 0, pmesh->GetComm());
    }
 
+   // 마지막에 Energy diff 출력해주는 로직인데 역시 전체 성능에는 영향 미치지 않음.
    const double energy_final = hydro.InternalEnergy(e_gf) +
                                hydro.KineticEnergy(v_gf);
    if (mpi.Root())
@@ -834,6 +939,7 @@ int main(int argc, char *argv[])
 
    // Print the error.
    // For problems 0 and 4 the exact velocity is constant in time.
+   // 에러 출력 로직
    if (problem == 0 || problem == 4)
    {
       const double error_max = v_gf.ComputeMaxError(v_coeff),
@@ -847,6 +953,7 @@ int main(int argc, char *argv[])
       }
    }
 
+   // 해당 없음
    if (visualization)
    {
       vis_v.close();
@@ -854,11 +961,17 @@ int main(int argc, char *argv[])
    }
 
    // Free the used memory.
+   // 메모리 해제
    delete ode_solver;
    delete pmesh;
 
    return 0;
 }
+
+/*******************************************************
+ * 각종 변수 및 함수 선언
+ * 딱히 의미는 없음.
+ ******************************************************/
 
 double rho0(const Vector &x)
 {
