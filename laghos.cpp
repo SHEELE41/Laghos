@@ -241,6 +241,7 @@ int main(int argc, char *argv[])
             bel->SetAttribute(attr);
          }
       }
+      // default 옵션이 아닌 외부 mesh 파일을 옵션으로 주었으며, dim 은 default 3 이므로 여기가 실행 됨
       if (dim == 3)
       {
          mesh = new Mesh(Mesh::MakeCartesian3D(2, 2, 2, Element::HEXAHEDRON,
@@ -377,6 +378,11 @@ int main(int argc, char *argv[])
    int product = 1;
    for (int d = 0; d < dim; d++) { product *= nxyz[d]; }
    const bool cartesian_partitioning = (cxyz.Size()>0)?true:false;
+
+   // MPI World Size 출력
+   // const int num_tasks = mpi.WorldSize(); 이기 때문에...
+   // cout << "num_tasks: " << num_tasks << '\n';
+
    if (product == num_tasks || cartesian_partitioning)
    {
       if (cartesian_partitioning)
@@ -769,6 +775,7 @@ int main(int argc, char *argv[])
       if (last_step || (ti % vis_steps) == 0)
       {
          double lnorm = e_gf * e_gf, norm;
+         // vis_step 값을 높여 실험해도 시간에 큰 차이는 없었음
          MPI_Allreduce(&lnorm, &norm, 1, MPI_DOUBLE, MPI_SUM, pmesh->GetComm());
          // 기본적으로 false, 옵션도 딱히 주지 않았음.
          // 그냥 Step과 함께 메모리 사용량을 출력할지 말지 선택하는 옵션
@@ -810,6 +817,8 @@ int main(int argc, char *argv[])
          // another set of GLVis connections (one from each rank):
          // 동일 커뮤니케이터 내의 모든 프로세스가 MPI_Barrier를 호출하기 전까지는 진행하지 않음.
          // 실행 시간에 악영향을 미칠수도.
+         // 어차피 vis 옵션 쓰지도 않는데 지워도 영향 없지 않을까?
+         // 주석 처리하고 실험해도 시간에 큰 차이는 없었음
          MPI_Barrier(pmesh->GetComm());
 
          // 해당 없음.
